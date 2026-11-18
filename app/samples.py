@@ -79,3 +79,105 @@ SAMPLES = [
         },
     },
 ]
+
+# ---------------------------------------------------------------------------
+# Contribution-analysis samples: same training payloads plus 1..32 validation
+# token pairs (input, target; -100 ignored).  These deliberately include a
+# harmful micro-batch (negative Shapley contribution) and an all-ignored one.
+# ---------------------------------------------------------------------------
+CONTRIBUTION_SAMPLES = [
+    {
+        "id": "beneficial-vs-harmful",
+        "title": "有益 vs 有害微批（2 个微批的精确 Shapley）",
+        "note": (
+            "align 微批让 4/7/9 号输入对自身目标过度自信，在含未见组合的"
+            "验证集上反而抬高平均交叉熵（Shapley 贡献为负、有害）；"
+            "conflict 微批把同样的输入推向别的目标，起到抑制过度自信的作用，"
+            "贡献为正（有益）。两批完整训练的总改善仍为正。"
+        ),
+        "payload": {
+            "seed": 20240517,
+            "scale": 1.0,
+            "vocab_size": 256,
+            "microbatches": [
+                {
+                    "name": "align",
+                    "tokens": [[4, 4], [7, 7], [9, 9], [4, 4]],
+                },
+                {
+                    "name": "conflict",
+                    "tokens": [[4, 8], [7, 8], [9, 3], [4, 3]],
+                },
+            ],
+            "validation_tokens": [
+                [4, 4], [7, 7], [9, 9], [4, 7], [7, 4],
+            ],
+        },
+    },
+    {
+        "id": "ignored-batch-neutral",
+        "title": "含全忽略微批（Shapley 贡献应为 0）",
+        "note": (
+            "ignored 微批的目标全部为 -100：任何包含它的子集都保持原始 W，"
+            "因此它的精确 Shapley 贡献恰好为 0；另外两批一正一负。"
+        ),
+        "payload": {
+            "seed": 991,
+            "scale": 0.5,
+            "vocab_size": 300,
+            "microbatches": [
+                {
+                    "name": "helpful",
+                    "tokens": [[1, 2], [6, 7], [8, 9], [10, 11]],
+                },
+                {
+                    "name": "ignored",
+                    "tokens": [[3, -100], [4, -100], [5, -100]],
+                },
+                {
+                    "name": "opposing",
+                    "tokens": [[1, 10], [6, 20], [8, 30], [10, 40]],
+                },
+            ],
+            "validation_tokens": [
+                [1, 2], [6, 7], [8, 9], [10, 11],
+                [2, 2], [7, 7], [11, -100],
+            ],
+        },
+    },
+    {
+        "id": "large-vocab-contribution",
+        "title": "大词表 4 微批（4096 词表，16 种加入顺序）",
+        "note": (
+            "4 个微批共 16 个 token，穷举 2^4=16 个候选 W 与 4!=24 种"
+            "加入顺序，验证贡献之和与完整训练总改善一致。"
+        ),
+        "payload": {
+            "seed": 424242,
+            "scale": 10.0,
+            "vocab_size": 4096,
+            "microbatches": [
+                {
+                    "name": "c-A",
+                    "tokens": [[1, 4095], [2048, 0], [4095, 4095], [17, 33]],
+                },
+                {
+                    "name": "c-B",
+                    "tokens": [[255, 256], [256, 255], [1024, 1024]],
+                },
+                {
+                    "name": "c-C",
+                    "tokens": [[0, 0], [4095, 1], [2047, 2048]],
+                },
+                {
+                    "name": "c-D",
+                    "tokens": [[7, 9], [9, 7], [33, 17], [17, -100]],
+                },
+            ],
+            "validation_tokens": [
+                [1, 4095], [2048, 0], [255, 256], [0, 0],
+                [4095, 4095], [7, 9], [9, 7], [33, 17],
+            ],
+        },
+    },
+]

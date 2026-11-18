@@ -10,8 +10,9 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from .contribution import analyze_contribution
 from .engine import ValidationError, evaluate
-from .samples import SAMPLES
+from .samples import CONTRIBUTION_SAMPLES, SAMPLES
 
 # The matrices are small (<=128 tokens, vocab <=4096, dim 16); more threads
 # cost more than they save.  Keep the container's footprint predictable.
@@ -36,12 +37,21 @@ def healthz() -> dict:
 
 @app.get("/api/samples")
 def samples() -> dict:
-    return {"samples": SAMPLES}
+    return {"samples": SAMPLES, "contribution_samples": CONTRIBUTION_SAMPLES}
 
 
 @app.post("/api/run")
 def run(payload: dict = Body(...)) -> dict:
     try:
         return evaluate(payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/contribution")
+def contribution(payload: dict = Body(...)) -> dict:
+    """Exact-Shapley validation contribution of every training micro-batch."""
+    try:
+        return analyze_contribution(payload)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

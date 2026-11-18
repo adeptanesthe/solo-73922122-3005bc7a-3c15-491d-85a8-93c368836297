@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>共享词嵌入 SGD 对照校验</title>
+<title>共享词嵌入 SGD 对照校验 · 微批验证贡献分析</title>
 <style>
   :root {
     --bg: #0f1420; --panel: #182030; --panel-2: #1f293b; --line: #2c3a52;
@@ -62,15 +62,25 @@
         padding: 10px; overflow: auto; font-size: 12px; max-height: 260px; }
   .err { color: var(--bad); font-size: 13px; white-space: pre-wrap; }
   .sep { height: 1px; background: var(--line); margin: 16px 0; }
+  .pos { color: var(--ok); } .neg { color: var(--bad); } .zero { color: var(--muted); }
+  .bar-wrap { background: #0c111b; border-radius: 6px; height: 10px; overflow: hidden;
+              border: 1px solid var(--line); min-width: 120px; }
+  .bar { height: 100%; border-radius: 6px; }
+  .bar.pos { background: var(--ok); } .bar.neg { background: var(--bad); }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>共享词嵌入续写训练 · SGD 单步对照校验</h1>
+  <h1>共享词嵌入续写训练 · SGD 单步对照校验 / 微批验证贡献分析</h1>
   <div class="sub">
     同一 float64 权重 W（种子 → 标准正态 × 倍率）既作输入嵌入又作输出投影；按全部有效 token
     （目标 -100 忽略）的平均交叉熵，以 lr=0.01 做一次 SGD。自定义 autograd 损失的分块投影临时张量
-    词表轴不超过 128，且前向不保存任何分块分数/概率；右侧与独立稠密参考逐项比对。
+    词表轴不超过 128，且前向不保存任何分块分数/概率；右侧与独立稠密参考逐项比对。<br />
+    <b>贡献分析</b>：对训练微批的每个子集从同一初始 W 各做一次原有 SGD 更新（空集/全忽略子集保持原始 W），
+    在录入的 1–32 组验证 token 上计算平均交叉熵，按全部加入顺序的平均边际改善量给出各批精确 Shapley
+    贡献；贡献之和等于完整训练的总改善，正贡献有益、负贡献有害。
   </div>
 </header>
 <main>
@@ -102,11 +112,23 @@
       </div>
 
       <div class="sep"></div>
+      <label>验证 token 对（1–32 组，供贡献分析使用）</label>
+      <textarea id="validation" spellcheck="false" style="min-height:96px;"></textarea>
+      <div class="meta" id="validation-meta" style="font-size:11px; color:var(--muted); margin-top:4px;"></div>
+      <div class="hint">
+        同样每行“输入号, 目标号”；目标 -100 在验证损失中忽略。
+        验证目标全部为 -100 时拒绝分析并清除旧贡献（原训练对照不受影响）。
+      </div>
+
+      <div class="sep"></div>
       <label>内置样例</label>
       <div class="samples" id="samples"></div>
+      <label style="margin-top:10px;">贡献分析样例（自动填充训练配置 + 验证对）</label>
+      <div class="samples" id="contrib-samples"></div>
 
-      <div style="margin-top:16px;">
+      <div style="margin-top:16px; display:flex; flex-wrap:wrap; gap:8px;">
         <button id="run" class="primary" type="button">运行对照</button>
+        <button id="run-contrib" type="button">运行贡献分析</button>
         <span id="status" class="pill" style="margin-left:8px;">就绪</span>
       </div>
       <div id="error" class="err" style="margin-top:10px;"></div>
@@ -117,6 +139,25 @@
         <h2>结论</h2>
         <div id="verdict" class="verdict idle">尚未运行</div>
         <div id="summary"></div>
+      </div>
+      <div class="card" id="contrib-card" style="display:none;">
+        <h2>微批验证贡献（精确 Shapley，平均边际改善）</h2>
+        <div id="contrib-verdict" class="verdict idle"></div>
+        <table>
+          <thead><tr><th>微批</th><th>有效token</th><th style="text-align:right">Shapley 贡献</th>
+          <th>判定</th><th style="width:32%">相对幅度</th></tr></thead>
+          <tbody id="contrib-rows"></tbody>
+        </table>
+        <table style="margin-top:10px;">
+          <tbody id="contrib-summary"></tbody>
+        </table>
+        <div class="hint" id="contrib-checks"></div>
+        <details>
+          <summary>全部候选子集的验证损失（2ⁿ 次独立 SGD 更新）</summary>
+          <table><thead><tr><th>子集（按加入微批）</th><th>是否更新 W</th>
+          <th style="text-align:right">验证平均交叉熵</th></tr></thead>
+          <tbody id="contrib-subsets"></tbody></table>
+        </details>
       </div>
       <div class="card">
         <h2>三项对照误差（阈值 1e-8）</h2>
@@ -147,8 +188,10 @@
 <script>
 const IGNORE = -100;
 const MAX_TOTAL = 128;
+const MAX_VALIDATION = 32;
 const $ = (id) => document.getElementById(id);
 let samplesCache = [];
+let contribSamplesCache = [];
 
 function pairToText(p) { return p.map(([i,t]) => `${i},${t}`).join("\n"); }
 
@@ -225,6 +268,28 @@ function collectPayload() {
   };
 }
 
+function collectValidationTokens() {
+  return parseBatchArea($("validation").value);
+}
+
+function recountValidation() {
+  let count = 0, valid = 0, problem = "";
+  try {
+    const pairs = collectValidationTokens();
+    count = pairs.length;
+    valid = pairs.filter(([, t]) => t !== IGNORE).length;
+    if (count > MAX_VALIDATION) problem = `验证对 ${count} > ${MAX_VALIDATION}`;
+  } catch (e) {
+    problem = e.message;
+  }
+  const meta = $("validation-meta");
+  if (problem) {
+    meta.innerHTML = `<span class="bad">${problem}</span>`;
+  } else {
+    meta.textContent = `${count} 组验证对，有效目标 ${valid} 组`;
+  }
+}
+
 function fmt(x) {
   if (x === 0) return "0";
   if (Math.abs(x) < 1e-4 || Math.abs(x) >= 1e6) return x.toExponential(6);
@@ -276,6 +341,111 @@ function render(report) {
     `各微批保存形状：[${m.saved_shapes_per_microbatch.map((s) => "(" + s.map((x) => x.join("×")).join("), (") + ")").join(" ｜ ")}]`;
 }
 
+function clearContribution(reason) {
+  $("contrib-card").style.display = "none";
+  $("contrib-rows").innerHTML = "";
+  $("contrib-summary").innerHTML = "";
+  $("contrib-subsets").innerHTML = "";
+  $("contrib-checks").textContent = "";
+  const v = $("contrib-verdict");
+  v.className = "verdict idle";
+  v.textContent = reason || "尚未运行贡献分析";
+}
+
+function renderContribution(report) {
+  $("contrib-card").style.display = "";
+  const verdict = $("contrib-verdict");
+  verdict.className = "verdict " + (report.ok ? "pass" : "fail");
+  verdict.textContent = report.message;
+
+  const maxAbs = Math.max(...report.contributions.map((c) =>
+    Math.abs(c.shapley_contribution)), 1e-300);
+  $("contrib-rows").innerHTML = report.contributions.map((c) => {
+    const v = c.shapley_contribution;
+    const cls = v > 0 ? "pos" : (v < 0 ? "neg" : "zero");
+    const width = Math.max(2, Math.round(Math.abs(v) / maxAbs * 100));
+    const sign = v > 0 ? "+" : "";
+    return `<tr>
+      <td>${c.microbatch}</td>
+      <td class="num">${c.training_valid_tokens}</td>
+      <td class="num ${cls}"><b>${sign}${fmt(v)}</b></td>
+      <td class="${cls}">${c.effect_label}</td>
+      <td><div class="bar-wrap"><div class="bar ${v < 0 ? "neg" : "pos"}"
+        style="width:${width}%"></div></div></td>
+    </tr>`;
+  }).join("");
+
+  const c = report.config;
+  $("contrib-summary").innerHTML = `
+    <tr><th>基线：原始 W 的验证平均交叉熵</th><td class="num">${fmt(report.baseline.validation_loss)}</td></tr>
+    <tr><th>完整训练后验证平均交叉熵</th><td class="num">${fmt(report.full_training.validation_loss)}</td></tr>
+    <tr><th>完整训练的训练损失（对照接口同值）</th><td class="num">${fmt(report.full_training.training_loss)}</td></tr>
+    <tr><th>总改善 = 基线 − 完整训练</th><td class="num pos"><b>+${fmt(report.total_improvement)}</b></td></tr>
+    <tr><th>各批 Shapley 贡献之和</th><td class="num">${fmt(report.sum_of_contributions)}</td></tr>
+    <tr><th>求和残差 |Σφ − 总改善|</th><td class="num">${fmt(report.residual_abs)}</td></tr>
+    <tr><th>穷举规模</th><td class="num">${c.subset_runs} 个候选 W ｜ ${c.permutations} 种加入顺序</td></tr>
+    <tr><th>验证有效 token / 录入对数</th><td class="num">${c.validation_valid_tokens} / ${c.validation_pairs}</td></tr>`;
+
+  const k = report.checks;
+  $("contrib-checks").innerHTML =
+    `一致性校验：Σφ 与总改善 ` +
+    `<b class="${k.shapley_sum_matches_improvement ? "ok" : "bad"}">` +
+    `${k.shapley_sum_matches_improvement ? "✓" : "✗"}</b>` +
+    `（残差 ${fmt(report.residual_abs)}）｜ 加权子集公式交叉核对 ` +
+    `<b class="${k.shapley_formula_cross_check ? "ok" : "bad"}">` +
+    `${k.shapley_formula_cross_check ? "✓" : "✗"}</b>` +
+    `（最大差 ${fmt(report.errors.shapley_formula_max_abs_diff)}）｜ 完整训练更新 vs 稠密参考 ` +
+    `<b class="${k.full_update_vs_dense ? "ok" : "bad"}">` +
+    `${k.full_update_vs_dense ? "✓" : "✗"}</b>` +
+    `（最大差 ${fmt(report.errors.full_update_vs_dense_max_abs_diff)}）`;
+
+  $("contrib-subsets").innerHTML = report.subset_losses.map((row) => `
+    <tr><td>${row.subset.length ? row.subset.join(" + ") : "（空集 → 原始 W）"}</td>
+        <td>${row.updated ? "SGD 更新" : "保持原始 W"}</td>
+        <td class="num">${fmt(row.validation_loss)}</td></tr>`).join("");
+}
+
+async function runContribution() {
+  const btn = $("run-contrib");
+  $("error").textContent = "";
+  let payload;
+  try {
+    payload = collectPayload();
+    payload.validation_tokens = collectValidationTokens();
+  } catch (e) {
+    $("error").textContent = e.message;
+    clearContribution("输入解析失败，已清除旧贡献");
+    return;
+  }
+  btn.disabled = true;
+  $("run").disabled = true;
+  $("status").textContent = "贡献分析运行中…";
+  try {
+    const resp = await fetch("/api/contribution", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await resp.json();
+    if (!resp.ok) {
+      const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      // Rejection (e.g. all validation targets are -100): clear stale results.
+      clearContribution("分析被拒绝，旧贡献已清除");
+      throw new Error(detail || `HTTP ${resp.status}`);
+    }
+    renderContribution(body);
+    $("status").textContent = `贡献分析完成 · ${body.ok ? "一致" : "校验未通过"}`;
+    $("status").className = "pill " + (body.ok ? "ok" : "bad");
+  } catch (e) {
+    $("error").textContent = "请求失败：" + e.message;
+    $("status").textContent = "失败";
+    $("status").className = "pill bad";
+  } finally {
+    btn.disabled = false;
+    $("run").disabled = false;
+  }
+}
+
 async function run() {
   const btn = $("run");
   $("error").textContent = "";
@@ -312,8 +482,10 @@ async function run() {
 async function loadSamples() {
   try {
     const resp = await fetch("/api/samples");
-    samplesCache = (await resp.json()).samples || [];
-  } catch (e) { samplesCache = []; }
+    const body = await resp.json();
+    samplesCache = body.samples || [];
+    contribSamplesCache = body.contribution_samples || [];
+  } catch (e) { samplesCache = []; contribSamplesCache = []; }
   $("samples").innerHTML = "";
   samplesCache.forEach((s) => {
     const b = document.createElement("button");
@@ -326,6 +498,15 @@ async function loadSamples() {
   if (!samplesCache.length) {
     $("samples").textContent = "样例加载失败（请确认 /api/samples 可用）";
   }
+  $("contrib-samples").innerHTML = "";
+  contribSamplesCache.forEach((s) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = s.title;
+    b.title = s.note;
+    b.addEventListener("click", () => applyContribSample(s));
+    $("contrib-samples").appendChild(b);
+  });
 }
 
 function applySample(sample) {
@@ -337,15 +518,30 @@ function applySample(sample) {
   $("error").textContent = sample.note;
 }
 
+function applyContribSample(sample) {
+  applySample(sample);
+  const p = sample.payload;
+  $("validation").value = (p.validation_tokens || [])
+    .map(([i, t]) => `${i}, ${t}`).join("\n");
+  recountValidation();
+  clearContribution("已载入样例，点击“运行贡献分析”");
+  $("error").textContent = sample.note;
+}
+
 $("add").addEventListener("click", () => {
   if (document.querySelectorAll(".mb").length >= 4) return;
   addBatch(`mb${document.querySelectorAll(".mb").length + 1}`, "1, 2");
 });
 $("clear").addEventListener("click", () => { $("batches").innerHTML = ""; recount(); });
 $("run").addEventListener("click", run);
+$("run-contrib").addEventListener("click", runContribution);
+$("validation").addEventListener("input", recountValidation);
 
 addBatch("dup-A", "4, 4\n4, 4\n7, 4\n4, 7");
 addBatch("dup-B", "4, 4\n9, 9\n9, -100\n4, 9");
+$("validation").value = "4, 4\n7, 7\n9, 9";
+recountValidation();
+clearContribution();
 loadSamples();
 </script>
 </body>
